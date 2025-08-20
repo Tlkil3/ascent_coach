@@ -48,7 +48,7 @@ If missing or unclear, suggest how the founder might articulate Kingdom Impact m
 """
 
 
-Also highlight any inconsistencies or gaps across the blocks, e.g. a mismatch between the value proposition and the customer segment, or unclear revenue streams.
+Also highlight any inconsistencies or gaps across the blocks—e.g., a mismatch between the value proposition and the customer segment, or unclear revenue streams.
 
 Close your feedback with a brief summary of strengths and suggested refinements.
 """
@@ -87,5 +87,4 @@ if st.button("Analyze Canvas"):
             st.subheader("🧐 AI Feedback")
             st.write(result)
     else:
-
         st.error("Please upload a PDF and provide a business overview.")
