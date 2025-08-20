@@ -1,70 +1,126 @@
+
 import streamlit as st
-import fitz  # PyMuPDF
-from openai import OpenAI
+import docx
+import openai
+import tempfile
+from docx.shared import Pt, RGBColor
+from docx.enum.style import WD_STYLE_TYPE
 import os
 
-# Title
-st.set_page_config(page_title="Business Model Canvas Coach")
-st.title("📊 Business Model Canvas Coach")
+# Load API key from Streamlit secrets
+openai.api_key = st.secrets["OPENAI_API_KEY"]
 
-# File uploader
-st.subheader("Upload a BMC PDF")
-uploaded_file = st.file_uploader("Upload a BMC PDF", type="pdf")
+# === Helper Functions ===
 
-# Function to extract text from PDF using PyMuPDF
-def extract_text_from_pdf(file):
-    with fitz.open(stream=file.read(), filetype="pdf") as doc:
-        text = ""
-        for page in doc:
-            text += page.get_text()
-    return text
+def extract_bmc_sections_from_docx(docx_file):
+    doc = docx.Document(docx_file)
+    sections = {}
+    current_heading = None
+    for para in doc.paragraphs:
+        text = para.text.strip()
+        if not text:
+            continue
+        if text[0].isdigit() and '.' in text:
+            current_heading = text
+            sections[current_heading] = ""
+        elif current_heading:
+            sections[current_heading] += text + " "
+    return sections
 
-# Display uploaded file and extracted text
-if uploaded_file is not None:
-    st.write(f"Uploaded: {uploaded_file.name}")
-    extracted_text = extract_text_from_pdf(uploaded_file)
-    st.subheader("Extracted BMC Text")
-    st.write(extracted_text)
+def get_business_name_and_description(docx_file):
+    doc = docx.Document(docx_file)
+    business_name = ""
+    description = ""
+    for para in doc.paragraphs:
+        text = para.text.strip()
+        if text.lower().startswith("business name:"):
+            business_name = text.split(":", 1)[1].strip()
+        elif text.lower().startswith("business description:"):
+            description = text.split(":", 1)[1].strip()
+        if business_name and description:
+            break
+    return business_name, description
 
-    # Button to assess BMC
-    if st.button("Assess BMC"):
-        # Load API key
-        try:
-            client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-        except Exception as e:
-            st.error("API key missing or invalid. Please add it to Streamlit secrets.")
-            st.stop()
+def generate_feedback(prompt):
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "You are a business model canvas evaluation expert helping Kenyan entrepreneurs improve their thinking."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7
+        )
+        return response.choices[0].message["content"]
+    except Exception as e:
+        return f"Error generating feedback: {e}"
 
-        # Prepare messages for GPT
-        messages = [
-            {
-                "role": "user",
-                "content": f"""Give constructive feedback on this BMC: ```{extracted_text}```.
-Evaluate each block's clarity, coherence, and completeness. Use this framework:
+def write_feedback_to_docx(business_name, feedback_dict):
+    doc = docx.Document()
 
-1. **Customer Segments**
-2. **Value Propositions**
-3. **Channels**
-4. **Customer Relationships**
-5. **Revenue Streams**
-6. **Key Resources**
-7. **Key Activities**
-8. **Key Partnerships**
-9. **Cost Structure**
+    # Define custom style for blue bold headers
+    styles = doc.styles
+    if "BlueBold" not in styles:
+        blue_bold_style = styles.add_style("BlueBold", WD_STYLE_TYPE.PARAGRAPH)
+        font = blue_bold_style.font
+        font.bold = True
+        font.color.rgb = RGBColor(0, 102, 204)  # Blue color
+        font.size = Pt(12)
 
-Also highlight inconsistencies—e.g., mismatches between value prop and customer segments.
-Be professional, helpful, and concise."""
-            }
-        ]
+    # Title
+    doc.add_heading(f"{business_name} - Business Model Canvas Assessment", level=1)
 
-        try:
-            response = client.chat.completions.create(
-                model="gpt-4",
-                messages=messages,
-                temperature=0.7,
+    for section, feedback in feedback_dict.items():
+        doc.add_paragraph(section, style="BlueBold")
+        doc.add_paragraph(feedback.strip())
+
+    # Save to temporary path
+    output_path = tempfile.NamedTemporaryFile(delete=False, suffix=".docx")
+    doc.save(output_path.name)
+    return output_path.name
+
+# === Streamlit App ===
+
+st.title("Business Model Canvas Coach (Ascent Coach)")
+st.write("Upload a Word document with your completed BMC to receive tailored feedback.")
+
+uploaded_file = st.file_uploader("Upload your Word (.docx) file", type="docx")
+
+if uploaded_file:
+    with st.spinner("Analyzing your Business Model Canvas..."):
+        business_name, business_description = get_business_name_and_description(uploaded_file)
+        sections = extract_bmc_sections_from_docx(uploaded_file)
+
+        feedback_dict = {}
+        for section_title, section_content in sections.items():
+            user_prompt = (
+                f"The business is called {business_name}.
+"
+                f"It operates in Kenya and is described as follows: {business_description}
+"
+                f"Below is the content for the BMC section titled '{section_title}'.
+"
+                "Please evaluate it, identify weaknesses or areas to improve, "
+                "raise thoughtful questions the entrepreneur should consider, "
+                "and provide specific suggestions.
+"
+                "Respond clearly and thoroughly.
+
+"
+                f"Section content:
+"""
+{section_content}
+""""
             )
-            feedback = response.choices[0].message.content
-            st.subheader("🧠 AI Feedback")
-            st.markdown(feedback)
-        except Exception as e:
-            st.error(f"Error generating feedback: {e}")
+            feedback = generate_feedback(user_prompt)
+            feedback_dict[section_title] = feedback
+
+        docx_path = write_feedback_to_docx(business_name, feedback_dict)
+
+    st.success("Assessment complete! Download your feedback below.")
+    st.download_button(
+        label="Download Feedback (Word doc)",
+        data=open(docx_path, "rb"),
+        file_name=f"{business_name}_BMC_Feedback.docx",
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
