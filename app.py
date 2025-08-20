@@ -93,25 +93,20 @@ if uploaded_file:
 
         feedback_dict = {}
         for section_title, section_content in sections.items():
-            user_prompt = (
-                f"The business is called {business_name}.
-"
-                f"It operates in Kenya and is described as follows: {business_description}
-"
-                f"Below is the content for the BMC section titled '{section_title}'.
-"
-                "Please evaluate it, identify weaknesses or areas to improve, "
-                "raise thoughtful questions the entrepreneur should consider, "
-                "and provide specific suggestions.
-"
-                "Respond clearly and thoroughly.
+            user_prompt = f"""The business is called {business_name}.
+It operates in Kenya and is described as follows: {business_description}
+Below is the content for the BMC section titled '{section_title}'.
 
-"
-                f"Section content:
-"""
+Please evaluate it, identify weaknesses or areas to improve,
+raise thoughtful questions the entrepreneur should consider,
+and provide specific suggestions.
+Respond clearly and thoroughly.
+
+Section content:
 {section_content}
-""""
-            )
+"""
+
+          
             feedback = generate_feedback(user_prompt)
             feedback_dict[section_title] = feedback
 
