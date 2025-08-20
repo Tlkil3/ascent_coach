@@ -1,58 +1,70 @@
-
 import streamlit as st
 import fitz  # PyMuPDF
-import openai
-import tempfile
+from openai import OpenAI
+import os
 
-# Load OpenAI API key from Streamlit secrets
-openai.api_key = st.secrets["OPENAI_API_KEY"]
-
-st.set_page_config(page_title="Business Model Canvas Coach", layout="centered")
+# Title
+st.set_page_config(page_title="Business Model Canvas Coach")
 st.title("📊 Business Model Canvas Coach")
 
-st.markdown("### Upload a BMC PDF")
+# File uploader
+st.subheader("Upload a BMC PDF")
 uploaded_file = st.file_uploader("Upload a BMC PDF", type="pdf")
 
+# Function to extract text from PDF using PyMuPDF
+def extract_text_from_pdf(file):
+    with fitz.open(stream=file.read(), filetype="pdf") as doc:
+        text = ""
+        for page in doc:
+            text += page.get_text()
+    return text
+
+# Display uploaded file and extracted text
 if uploaded_file is not None:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-        tmp_file.write(uploaded_file.read())
-        tmp_file_path = tmp_file.name
+    st.write(f"Uploaded: {uploaded_file.name}")
+    extracted_text = extract_text_from_pdf(uploaded_file)
+    st.subheader("Extracted BMC Text")
+    st.write(extracted_text)
 
-    doc = fitz.open(tmp_file_path)
-    bmc_text = ""
-    for page in doc:
-        bmc_text += page.get_text()
-
-    st.markdown("### Extracted BMC Text")
-    st.text(bmc_text)
-
+    # Button to assess BMC
     if st.button("Assess BMC"):
-        with st.spinner("Thinking..."):
-            try:
-                response = openai.ChatCompletion.create(
-                    model="gpt-4",
-                    messages=[
-                        {"role": "system", "content": "You are a startup coach assessing a business model canvas (BMC). Provide concise, practical, and holistic feedback."},
-                        {"role": "user", "content": f"""Give constructive feedback on this BMC:
+        # Load API key
+        try:
+            client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+        except Exception as e:
+            st.error("API key missing or invalid. Please add it to Streamlit secrets.")
+            st.stop()
 
-{bmc_text}
+        # Prepare messages for GPT
+        messages = [
+            {
+                "role": "user",
+                "content": f"""Give constructive feedback on this BMC: ```{extracted_text}```.
+Evaluate each block's clarity, coherence, and completeness. Use this framework:
 
-Highlight strengths and weaknesses in each of the 9 blocks: Customer Segments, Value Propositions, Channels, Customer Relationships, Revenue Streams, Key Activities, Key Resources, Key Partnerships, and Cost Structure.
+1. **Customer Segments**
+2. **Value Propositions**
+3. **Channels**
+4. **Customer Relationships**
+5. **Revenue Streams**
+6. **Key Resources**
+7. **Key Activities**
+8. **Key Partnerships**
+9. **Cost Structure**
 
-Also highlight any inconsistencies or gaps across the blocks—for example, a mismatch between the value proposition and the customer segment, or unclear revenue streams.
+Also highlight inconsistencies—e.g., mismatches between value prop and customer segments.
+Be professional, helpful, and concise."""
+            }
+        ]
 
-This box reflects the founder's intended faith-driven or missional impact in the world. Please assess their intentions across four areas:
-
-1. Is the mission clearly articulated?
-2. Is it meaningfully integrated into the business model?
-3. Are there potential tensions between the mission and the model?
-4. What suggestions do you have to improve alignment or impact?
-
-Conclude with 3 coaching questions to push the founder's thinking forward."""}
-                    ],
-                    temperature=0.7,
-                )
-                st.markdown("### AI Feedback")
-                st.write(response.choices[0].message.content.strip())
-            except Exception as e:
-                st.error(f"Error generating feedback: {e}")
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4",
+                messages=messages,
+                temperature=0.7,
+            )
+            feedback = response.choices[0].message.content
+            st.subheader("🧠 AI Feedback")
+            st.markdown(feedback)
+        except Exception as e:
+            st.error(f"Error generating feedback: {e}")
