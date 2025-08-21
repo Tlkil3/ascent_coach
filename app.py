@@ -33,7 +33,6 @@ def get_client():
     if proj_id:
         os.environ["OPENAI_PROJECT"] = proj_id
 
-    # Add a request timeout so calls do not hang indefinitely
     return OpenAI(timeout=30.0)
 
 # ---------------- Prompts ----------------
@@ -79,7 +78,6 @@ Formatting Rules:
 - DO NOT include legal or financial advice; include a footer “Advisory—Not Legal/Financial Advice.”
 """).strip()
 
-# Force Markdown structure for reliable DOCX conversion
 MARKDOWN_INSTRUCTION = (
     "Return the assessment as Markdown. "
     "Use '##' for major sections (1) Problem … 14) Final Assessment). "
@@ -189,6 +187,45 @@ with st.form("bmc_form"):
     submitted = st.form_submit_button("Run Review")
 
 # ---------------- Helpers ----------------
+MAJOR_SECTIONS = [
+    "1) Problem","2) Value Proposition","3) Unfair Advantage","4) Customer Segments",
+    "5) Channels","6) Customer Relationships","7) Key Activities","8) Key Resources",
+    "9) Key Partners","10) Revenue Streams","11) Cost Structure","12) Kingdom Impact",
+    "13) Cross-Block Observations","14) Final Assessment"
+]
+SUB_SECTIONS = [
+    "Strengths","Weaknesses","Probing Questions","Suggested Explorations",
+    "Inconsistencies","Opportunities to Strengthen",
+    "Quick Wins","Deeper Strategic Questions","Overall Cohesiveness"
+]
+ADVISORY_TEXTS = {
+    "Advisory—Not Legal/Financial Advice.",
+    "Footer: Advisory—Not Legal/Financial Advice."
+}
+
+def normalize_markdown(md_text: str) -> str:
+    """
+    Ensure known section titles/subtitles become proper Markdown headings.
+    Also strip duplicated advisory lines; we will add a single footer later.
+    """
+    out_lines = []
+    for raw in md_text.splitlines():
+        line = raw.strip()
+        if not line:
+            out_lines.append("")  # preserve spacing
+            continue
+        if line in ADVISORY_TEXTS:
+            # skip here; added once at the end in DOCX builder
+            continue
+        if line in MAJOR_SECTIONS:
+            out_lines.append("## " + line)
+            continue
+        if line in SUB_SECTIONS:
+            out_lines.append("### " + line)
+            continue
+        out_lines.append(line)
+    return "\n".join(out_lines).strip()
+
 def build_founder_payload():
     return {
         "business_name": (business_name or "").strip(),
@@ -208,7 +245,7 @@ def build_founder_payload():
     }
 
 def build_docx_from_markdown(md_text: str, founder_payload: dict) -> bytes:
-    """Create a Word doc with centered logo; Section H1 = bold+blue, Subsection H2 = bold+black; bullets preserved."""
+    """Create a Word doc with centered logo; H1=bold+blue, H2=bold+black; bullets preserved; single footer."""
     doc = Document()
 
     # --- BRANDING: LOGO (centered) ---
@@ -243,7 +280,6 @@ def build_docx_from_markdown(md_text: str, founder_payload: dict) -> bytes:
     meta.add_run(bd)
 
     # --- GLOBAL STYLES ---
-    # Normal
     normal = doc.styles["Normal"].font
     normal.name = "Calibri"; normal.size = Pt(11)
 
@@ -257,10 +293,12 @@ def build_docx_from_markdown(md_text: str, founder_payload: dict) -> bytes:
     h2.name = "Calibri"; h2.size = Pt(12); h2.bold = True
     h2.color.rgb = RGBColor(0, 0, 0)
 
-    # --- BODY FROM MARKDOWN ---
-    for raw in md_text.splitlines():
+    # --- BODY FROM NORMALIZED MARKDOWN ---
+    norm = normalize_markdown(md_text)
+    for raw in norm.splitlines():
         line = raw.strip()
-        if not line:
+        if line == "":
+            doc.add_paragraph("")  # blank line
             continue
         if line.startswith("## "):            # Major section
             doc.add_heading(line[3:].strip(), level=1)
@@ -272,7 +310,7 @@ def build_docx_from_markdown(md_text: str, founder_payload: dict) -> bytes:
         else:
             doc.add_paragraph(line)
 
-    # --- FOOTER ---
+    # --- FOOTER (add once) ---
     doc.add_paragraph().add_run("Advisory—Not Legal/Financial Advice.").italic = True
 
     buf = BytesIO()
@@ -314,7 +352,6 @@ if submitted:
                 ],
             )
             output = resp.choices[0].message.content
-            # Only offer download; do NOT print output on the page
             render_download_only(output, payload)
         except Exception as e:
             st.error(f"OpenAI request failed: {e}")
