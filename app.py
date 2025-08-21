@@ -1,30 +1,47 @@
+# app.py
 import os
 import textwrap
 import streamlit as st
 from openai import OpenAI
 
-# ---------- App Config ----------
+# ---------------- App Config ----------------
 st.set_page_config(page_title="Sinapis AI Coach – BMC Review", page_icon="🧭", layout="wide")
 st.title("Sinapis AI Coach – Ascent BMC Review")
-
 st.markdown(
     "Founders: complete the form and click **Run Review**. "
     "You’ll receive structured feedback using the Sinapis Ascent Business Model Canvas framework."
 )
 
-# ---------- Secrets / OpenAI Client ----------
+# ---------------- OpenAI Client (robust across SDK versions) ----------------
 def get_client():
     api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-    org = st.secrets.get("OPENAI_ORG") or os.getenv("OPENAI_ORG")
-    project = st.secrets.get("OPENAI_PROJECT") or os.getenv("OPENAI_PROJECT")
+    org_id  = st.secrets.get("OPENAI_ORG")     or os.getenv("OPENAI_ORG") or os.getenv("OPENAI_ORG_ID")
+    proj_id = st.secrets.get("OPENAI_PROJECT") or os.getenv("OPENAI_PROJECT")
+
     if not api_key:
         st.error("Missing OPENAI_API_KEY in Streamlit Secrets.")
         st.stop()
-    return OpenAI(api_key=api_key, organization=org, project=project)
+
+    # Set env vars so the SDK auto-picks them up (avoids constructor TypeError differences)
+    os.environ["OPENAI_API_KEY"] = api_key
+    if org_id:
+        os.environ["OPENAI_ORG_ID"] = org_id
+    if proj_id:
+        os.environ["OPENAI_PROJECT"] = proj_id
+
+    return OpenAI()  # no kwargs; reads from env
 
 client = get_client()
 
-# ---------- Prompts (Phase 1: prompt-only) ----------
+# Optional: quick health check
+try:
+    _ = client.models.list()
+    st.info("✅ OpenAI connected.")
+except Exception as e:
+    st.error(f"OpenAI connection failed: {e}")
+    st.stop()
+
+# ---------------- Prompts (Phase 1: prompt-only) ----------------
 SINAPIS_COACH_SYS = textwrap.dedent("""
 You are **Sinapis AI Coach**, reviewing founder submissions using the Sinapis Ascent Business Model Canvas.
 Context:
@@ -143,7 +160,7 @@ Use exactly these headings and order:
 Footer: Advisory—Not Legal/Financial Advice.
 """).strip()
 
-# ---------- Form (Founder Inputs) ----------
+# ---------------- Founder Form ----------------
 with st.form("bmc_form"):
     st.subheader("Founder Submission")
     col1, col2 = st.columns(2)
@@ -167,23 +184,23 @@ with st.form("bmc_form"):
 
     submitted = st.form_submit_button("Run Review")
 
-# ---------- Helper to build the user payload ----------
+# ---------------- Helpers ----------------
 def build_founder_payload():
     return {
-        "business_name": business_name.strip(),
-        "brief_description": brief_description.strip(),
-        "problem": problem.strip(),
-        "value_proposition": value_proposition.strip(),
-        "unfair_advantage": unfair_advantage.strip(),
-        "customer_segments": customer_segments.strip(),
-        "channels": channels.strip(),
-        "customer_relationships": customer_relationships.strip(),
-        "key_activities": key_activities.strip(),
-        "key_resources": key_resources.strip(),
-        "key_partners": key_partners.strip(),
-        "revenue_streams": revenue_streams.strip(),
-        "cost_structure": cost_structure.strip(),
-        "kingdom_impact": kingdom_impact.strip(),
+        "business_name": (business_name or "").strip(),
+        "brief_description": (brief_description or "").strip(),
+        "problem": (problem or "").strip(),
+        "value_proposition": (value_proposition or "").strip(),
+        "unfair_advantage": (unfair_advantage or "").strip(),
+        "customer_segments": (customer_segments or "").strip(),
+        "channels": (channels or "").strip(),
+        "customer_relationships": (customer_relationships or "").strip(),
+        "key_activities": (key_activities or "").strip(),
+        "key_resources": (key_resources or "").strip(),
+        "key_partners": (key_partners or "").strip(),
+        "revenue_streams": (revenue_streams or "").strip(),
+        "cost_structure": (cost_structure or "").strip(),
+        "kingdom_impact": (kingdom_impact or "").strip(),
     }
 
 def render_assessment(markdown_text: str):
@@ -191,16 +208,17 @@ def render_assessment(markdown_text: str):
     st.subheader("AI Assessment")
     st.markdown(markdown_text)
 
-# ---------- Run the review ----------
+# ---------------- Run Review ----------------
 if submitted:
     with st.spinner("Generating structured review…"):
-        founder_payload = build_founder_payload()
+        payload = build_founder_payload()
 
-        # Compose the single user message with normalized fields
-        user_message = "Founder Input (normalized JSON):\n" + str(founder_payload) + "\n\n" \
-                       "Use the response template exactly."
+        user_message = (
+            "Founder Input (normalized JSON):\n"
+            + str(payload)
+            + "\n\nUse the response template exactly."
+        )
 
-        # Chat Completions (Phase 1)
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
             temperature=0.2,
@@ -210,9 +228,8 @@ if submitted:
                 {"role": "user", "content": user_message},
             ],
         )
-
         output = resp.choices[0].message.content
         render_assessment(output)
 
-# ---------- Footer ----------
+# ---------------- Footer ----------------
 st.caption("Advisory—Not Legal/Financial Advice.")
