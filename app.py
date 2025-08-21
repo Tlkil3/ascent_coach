@@ -6,7 +6,7 @@ from io import BytesIO
 import streamlit as st
 from openai import OpenAI
 from docx import Document
-from docx.shared import Pt, Inches
+from docx.shared import Pt, Inches, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 # ---------------- App Config ----------------
@@ -14,10 +14,10 @@ st.set_page_config(page_title="Sinapis AI Coach – BMC Review", page_icon="🧭
 st.title("Sinapis AI Coach – Ascent BMC Review")
 st.markdown(
     "Founders: complete the form and click **Run Review**. "
-    "You’ll receive structured feedback using the Sinapis Ascent Business Model Canvas framework."
+    "You’ll receive a downloadable Word report based on the Sinapis Ascent Business Model Canvas framework."
 )
 
-# ---------------- OpenAI Client (lazy, non-blocking on load) ----------------
+# ---------------- OpenAI Client (lazy) ----------------
 def get_client():
     api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
     org_id  = st.secrets.get("OPENAI_ORG")     or os.getenv("OPENAI_ORG") or os.getenv("OPENAI_ORG_ID")
@@ -27,14 +27,13 @@ def get_client():
         st.error("Missing OPENAI_API_KEY in Streamlit Secrets.")
         st.stop()
 
-    # Env vars so SDK finds them
     os.environ["OPENAI_API_KEY"] = api_key
     if org_id:
         os.environ["OPENAI_ORG_ID"] = org_id
     if proj_id:
         os.environ["OPENAI_PROJECT"] = proj_id
 
-    # Add a request timeout so calls don't hang indefinitely (seconds)
+    # Add a request timeout so calls do not hang indefinitely
     return OpenAI(timeout=30.0)
 
 # ---------------- Prompts ----------------
@@ -80,6 +79,7 @@ Formatting Rules:
 - DO NOT include legal or financial advice; include a footer “Advisory—Not Legal/Financial Advice.”
 """).strip()
 
+# Force Markdown structure for reliable DOCX conversion
 MARKDOWN_INSTRUCTION = (
     "Return the assessment as Markdown. "
     "Use '##' for major sections (1) Problem … 14) Final Assessment). "
@@ -164,14 +164,6 @@ Use exactly these headings and order:
 Footer: Advisory—Not Legal/Financial Advice.
 """).strip()
 
-# ---------------- Light CSS ----------------
-st.markdown("""
-<style>
-h2 { margin-top: 1.0rem; }
-h3 { margin-top: 0.6rem; }
-</style>
-""", unsafe_allow_html=True)
-
 # ---------------- Founder Form ----------------
 with st.form("bmc_form"):
     st.subheader("Founder Submission")
@@ -216,10 +208,10 @@ def build_founder_payload():
     }
 
 def build_docx_from_markdown(md_text: str, founder_payload: dict) -> bytes:
-    """Create a Word doc with centered logo + styled headings/bullets; warn if logo missing."""
+    """Create a Word doc with centered logo; Section H1 = bold+blue, Subsection H2 = bold+black; bullets preserved."""
     doc = Document()
 
-    # --- BRANDING: LOGO (centered above title) ---
+    # --- BRANDING: LOGO (centered) ---
     base_dir = os.path.dirname(__file__)
     logo_path = os.path.join(base_dir, "assets", "logo.png")
     if os.path.exists(logo_path):
@@ -231,14 +223,12 @@ def build_docx_from_markdown(md_text: str, founder_payload: dict) -> bytes:
         except Exception as e:
             st.warning(f"Logo found but could not be inserted: {e}")
             p = doc.add_paragraph()
-            r = p.add_run("Logo present but could not be inserted.")
-            r.italic = True
+            r = p.add_run("Logo present but could not be inserted."); r.italic = True
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     else:
         st.warning("Logo not found at assets/logo.png. Skipping logo in exported report.")
         p = doc.add_paragraph()
-        r = p.add_run("Logo not found (assets/logo.png)")
-        r.italic = True
+        r = p.add_run("Logo not found (assets/logo.png)"); r.italic = True
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
     # --- TITLE (dynamic, centered) ---
@@ -253,25 +243,30 @@ def build_docx_from_markdown(md_text: str, founder_payload: dict) -> bytes:
     meta.add_run(bd)
 
     # --- GLOBAL STYLES ---
+    # Normal
     normal = doc.styles["Normal"].font
     normal.name = "Calibri"; normal.size = Pt(11)
 
+    # Heading 1 (major sections) -> bold + blue
     h1 = doc.styles["Heading 1"].font
     h1.name = "Calibri"; h1.size = Pt(14); h1.bold = True
+    h1.color.rgb = RGBColor(31, 78, 121)  # deep blue
 
+    # Heading 2 (subsections) -> bold + black
     h2 = doc.styles["Heading 2"].font
     h2.name = "Calibri"; h2.size = Pt(12); h2.bold = True
+    h2.color.rgb = RGBColor(0, 0, 0)
 
     # --- BODY FROM MARKDOWN ---
     for raw in md_text.splitlines():
         line = raw.strip()
         if not line:
             continue
-        if line.startswith("## "):
+        if line.startswith("## "):            # Major section
             doc.add_heading(line[3:].strip(), level=1)
-        elif line.startswith("### "):
+        elif line.startswith("### "):         # Subsection
             doc.add_heading(line[4:].strip(), level=2)
-        elif line.startswith(("• ", "- ")):
+        elif line.startswith(("• ", "- ")):   # Bullet
             text = line[2:].strip()
             doc.add_paragraph(text, style="List Bullet")
         else:
@@ -285,41 +280,29 @@ def build_docx_from_markdown(md_text: str, founder_payload: dict) -> bytes:
     buf.seek(0)
     return buf.getvalue()
 
-def render_assessment(markdown_text: str, founder_payload: dict = None):
-    st.divider()
-    name_for_title = (founder_payload or {}).get("business_name") or "(Unnamed Business)"
-    st.subheader(f"BMC Review of {name_for_title}")
-    st.markdown(markdown_text)
-
-    founder_payload = founder_payload or {}
+def render_download_only(markdown_text: str, founder_payload: dict):
+    """Do not render the report inline; only show a ready message + Word download button."""
+    st.success("Your AI review is ready. Click below to download the Word report.")
     docx_bytes = build_docx_from_markdown(markdown_text, founder_payload)
     st.download_button(
-        label="⬇️ Download as Word (.docx)",
+        label="⬇️ Download your review (Word .docx)",
         data=docx_bytes,
         file_name="Sinapis_AI_Coach_Assessment.docx",
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         use_container_width=True
     )
-    st.download_button(
-        label="⬇️ Download as Markdown (.md)",
-        data=markdown_text,
-        file_name="Sinapis_AI_Coach_Assessment.md",
-        mime="text/markdown",
-        use_container_width=True
-    )
 
 # ---------------- Run Review ----------------
 if submitted:
-    with st.spinner("Generating structured review…"):
+    with st.spinner("Generating your review…"):
         payload = build_founder_payload()
         user_message = (
             "Founder Input (normalized JSON):\n"
             + str(payload)
             + "\n\nUse the response template exactly."
         )
-
         try:
-            client = get_client()  # create client only when needed
+            client = get_client()
             resp = client.chat.completions.create(
                 model="gpt-4o-mini",
                 temperature=0.2,
@@ -331,7 +314,8 @@ if submitted:
                 ],
             )
             output = resp.choices[0].message.content
-            render_assessment(output, payload)
+            # Only offer download; do NOT print output on the page
+            render_download_only(output, payload)
         except Exception as e:
             st.error(f"OpenAI request failed: {e}")
 
