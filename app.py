@@ -15,7 +15,7 @@ st.markdown(
     "You’ll receive structured feedback using the Sinapis Ascent Business Model Canvas framework."
 )
 
-# ---------------- OpenAI Client (robust across SDK versions) ----------------
+# ---------------- OpenAI Client ----------------
 def get_client():
     api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
     org_id  = st.secrets.get("OPENAI_ORG")     or os.getenv("OPENAI_ORG") or os.getenv("OPENAI_ORG_ID")
@@ -25,14 +25,13 @@ def get_client():
         st.error("Missing OPENAI_API_KEY in Streamlit Secrets.")
         st.stop()
 
-    # Set env vars so the SDK auto-picks them up (avoids constructor differences across versions)
     os.environ["OPENAI_API_KEY"] = api_key
     if org_id:
         os.environ["OPENAI_ORG_ID"] = org_id
     if proj_id:
         os.environ["OPENAI_PROJECT"] = proj_id
 
-    return OpenAI()  # reads from env
+    return OpenAI()
 
 client = get_client()
 
@@ -44,7 +43,7 @@ except Exception as e:
     st.error(f"OpenAI connection failed: {e}")
     st.stop()
 
-# ---------------- Prompts (Phase 1: prompt-only) ----------------
+# ---------------- Prompts ----------------
 SINAPIS_COACH_SYS = textwrap.dedent("""
 You are **Sinapis AI Coach**, reviewing founder submissions using the Sinapis Ascent Business Model Canvas.
 Context:
@@ -57,40 +56,11 @@ Tone & Style:
 - Ask probing questions to guide the founder’s next steps.
 - NEVER invent content for missing blocks. If a block is blank or unclear, explicitly mark it as “Missing/Needs input.”
 - Be concise where possible; avoid jargon.
-
-Evaluation Rubric (apply to each block):
-- Problem: Is it a must-have? Evidence it’s worth solving? Aware of alternatives? Avoid innovator’s bias.
-- Value Proposition: Clear, compelling, differentiated (≤3 sentences). Why better than alternatives?
-- Unfair Advantage: Defensible uniqueness (IP, network effects, brand, economies of scale, team). Durability over time.
-- Customer Segments: Specific, sized, reachable, willing & able to pay. Alignment with value prop.
-- Channels: Sales/distribution + communication; fit with customer preferences; cost-effectiveness; integrated touchpoints.
-- Customer Relationships: Acquisition, retention, upsell; transactional vs relational; cost vs value.
-- Key Activities: Core tasks linked to value, channels, relationships, revenue; distinguish from partner-able tasks.
-- Key Resources: Human, physical, IP, financial; prioritize scarce/critical items.
-- Key Partners: Critical external orgs; why they matter; fit with gaps in resources/activities; values-aligned.
-- Revenue Streams: Sources by segment; pricing model logic; margins/unit economics; concentration risk.
-- Cost Structure: Major costs & drivers; fixed vs variable; unit costs; runway; control measures.
-- Kingdom Impact: Intentionality across Economic, Social, Spiritual, Environmental; tie to operations and growth strategy.
-
-Cross-Block Checks (always run):
-- Value Prop ↔ Customer Segments
-- Segments ↔ Channels
-- Value Prop ↔ Revenue
-- Activities ↔ Resources
-- Partners ↔ Resources/Activities
-- Costs ↔ Revenue
-- Kingdom Impact ↔ All Blocks
-
-Formatting Rules:
-- Use bullet points under each subheading; keep to 3–6 bullets per list when possible.
-- If a field provided by the founder is ambiguous, explicitly note “Ambiguous” and ask a clarifying question.
-- DO NOT include legal or financial advice; include a footer “Advisory—Not Legal/Financial Advice.”
 """).strip()
 
-# Force the model to return clean Markdown with proper headings/bullets
 MARKDOWN_INSTRUCTION = (
     "Return the assessment as **Markdown** using '##' for section titles and '###' for subheadings. "
-    "Use true bullet lists (• or -) for items. Preserve the exact section order and names from the Response Template."
+    "Use bullet lists for items. Preserve the exact section order and names from the Response Template."
 )
 
 SINAPIS_RESPONSE_TEMPLATE = textwrap.dedent("""
@@ -169,7 +139,7 @@ Use exactly these headings and order:
 Footer: Advisory—Not Legal/Financial Advice.
 """).strip()
 
-# ---------------- Light CSS for spacing ----------------
+# ---------------- Light CSS ----------------
 st.markdown("""
 <style>
 h2 { margin-top: 1.0rem; }
@@ -221,15 +191,13 @@ def build_founder_payload():
     }
 
 def build_docx_from_markdown(md_text: str, founder_payload: dict) -> bytes:
-    """Very light MD-to-DOCX mapping: H2->Heading 1, H3->Heading 2, bullets->List Bullet."""
+    """Map Markdown headings and bullets into a Word doc."""
     doc = Document()
-    # Title + meta
     doc.add_heading('Sinapis AI Coach – Ascent BMC Review', level=0)
     bn = founder_payload.get("business_name") or "—"
     bd = founder_payload.get("brief_description") or "—"
     meta = doc.add_paragraph()
     meta.add_run("Business: ").bold = True; meta.add_run(bn)
-    meta.add_run("   |   ")
     meta2 = doc.add_paragraph()
     meta2.add_run("Description: ").bold = True; meta2.add_run(bd)
 
@@ -242,3 +210,62 @@ def build_docx_from_markdown(md_text: str, founder_payload: dict) -> bytes:
         elif line.startswith("### "):
             doc.add_heading(line[4:].strip(), level=2)
         elif line.startswith(("• ", "- ")):
+            text = line[2:].strip()
+            doc.add_paragraph(text, style="List Bullet")
+        else:
+            doc.add_paragraph(line)
+
+    doc.add_paragraph().add_run("Advisory—Not Legal/Financial Advice.").italic = True
+
+    buff = BytesIO()
+    doc.save(buff)
+    buff.seek(0)
+    return buff.getvalue()
+
+def render_assessment(markdown_text: str, founder_payload: dict = None):
+    st.divider()
+    st.subheader("AI Assessment")
+    st.markdown(markdown_text)
+
+    founder_payload = founder_payload or {}
+    docx_bytes = build_docx_from_markdown(markdown_text, founder_payload)
+    st.download_button(
+        label="⬇️ Download as Word (.docx)",
+        data=docx_bytes,
+        file_name="Sinapis_AI_Coach_Assessment.docx",
+        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        use_container_width=True
+    )
+    st.download_button(
+        label="⬇️ Download as Markdown (.md)",
+        data=markdown_text,
+        file_name="Sinapis_AI_Coach_Assessment.md",
+        mime="text/markdown",
+        use_container_width=True
+    )
+
+# ---------------- Run Review ----------------
+if submitted:
+    with st.spinner("Generating structured review…"):
+        payload = build_founder_payload()
+        user_message = (
+            "Founder Input (normalized JSON):\n"
+            + str(payload)
+            + "\n\nUse the response template exactly."
+        )
+
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            temperature=0.2,
+            messages=[
+                {"role": "system", "content": SINAPIS_COACH_SYS},
+                {"role": "system", "content": MARKDOWN_INSTRUCTION},
+                {"role": "system", "content": "Response Template:\n" + SINAPIS_RESPONSE_TEMPLATE},
+                {"role": "user", "content": user_message},
+            ],
+        )
+        output = resp.choices[0].message.content
+        render_assessment(output, payload)
+
+# ---------------- Footer ----------------
+st.caption("Advisory—Not Legal/Financial Advice.")
