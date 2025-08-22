@@ -26,7 +26,7 @@ def get_client():
     os.environ["OPENAI_API_KEY"] = api_key
     if org_id:  os.environ["OPENAI_ORG_ID"] = org_id
     if proj_id: os.environ["OPENAI_PROJECT"] = proj_id
-    # firm per-request timeout (seconds)
+    # Firm per-request timeout (seconds)
     return OpenAI(timeout=60.0)
 
 # ---------- Prompts ----------
@@ -156,11 +156,54 @@ FIELD_ALIASES = {
 }
 ALIAS_TO_KEY = {normalize_label(a): k for k, arr in FIELD_ALIASES.items() for a in arr}
 
+BASE_PHRASE = {
+    "business_name": "business name",
+    "brief_description": "brief description",
+    "problem": "problem",
+    "value_proposition": "value proposition",
+    "unfair_advantage": "unfair advantage",
+    "customer_segments": "customer segments",
+    "channels": "channels",
+    "customer_relationships": "customer relationships",
+    "key_activities": "key activities",
+    "key_resources": "key resources",
+    "key_partners": "key partners",
+    "revenue_streams": "revenue streams",
+    "cost_structure": "cost structure",
+    "kingdom_impact": "kingdom impact",
+}
+
+def guess_key_from_label_cell(left_text: str):
+    """Find the correct field key from a left-cell that may include a label + hint on multiple lines."""
+    if not left_text:
+        return None
+    lines = [normalize_label(x) for x in left_text.splitlines()]
+    lines = [x for x in lines if x]
+
+    # 1) exact alias match on any line
+    for ln in lines:
+        if ln in ALIAS_TO_KEY:
+            return ALIAS_TO_KEY[ln]
+
+    # 2) fuzzy contains (base phrase present anywhere on a line)
+    for ln in lines:
+        for key, phrase in BASE_PHRASE.items():
+            if phrase in ln:
+                return key
+    return None
+
 HINT_SNIPPETS = [
-    "provide a brief description", "what customer problem", "what are you offering",
-    "what is your uniqueness", "which customer groups", "through what means do you reach",
-    "what type of relationship", "what tasks are vital", "what assets are essential",
-    "which external organizations", "how does your business earn revenue",
+    "provide a brief description",
+    "what customer problem",
+    "what are you offering",
+    "what is your uniqueness",
+    "which customer groups",
+    "through what means do you reach",
+    "what type of relationship",
+    "what tasks are vital",
+    "what assets are essential",
+    "which external organizations",
+    "how does your business earn revenue",
     "what are the defining characteristics of your cost structure",
     "where and how are you intentionally looking to make impact",
 ]
@@ -179,19 +222,20 @@ def parse_docx_to_payload(doc_bytes: bytes) -> dict:
     doc = Document(BytesIO(doc_bytes))
     buf = {k: "" for k in FIELD_ALIASES.keys()}
 
-    # A) parse tables first
+    # A) parse tables first (works with labels+hints in the left cell)
     saw_nonempty = False
     for table in doc.tables:
         for row in table.rows:
             if len(row.cells) < 2: continue
-            key = ALIAS_TO_KEY.get(normalize_label(row.cells[0].text))
+            key = guess_key_from_label_cell(row.cells[0].text)
             val = clean_value(row.cells[1].text)
             if key and val:
-                buf[key] = val; saw_nonempty = True
+                buf[key] = val
+                saw_nonempty = True
     if saw_nonempty:
         return buf
 
-    # B) fallback to heading paragraphs
+    # B) fallback to heading-style paragraphs (our template)
     current_key = None
     for p in doc.paragraphs:
         t = (p.text or "").strip()
@@ -200,8 +244,7 @@ def parse_docx_to_payload(doc_bytes: bytes) -> dict:
         if norm in ALIAS_TO_KEY:
             current_key = ALIAS_TO_KEY[norm]; continue
         if current_key:
-            # if they typed a new heading inline
-            if norm in ALIAS_TO_KEY:
+            if norm in ALIAS_TO_KEY:  # new heading inline
                 current_key = ALIAS_TO_KEY[norm]; continue
             val = clean_value(t)
             if val:
@@ -314,16 +357,14 @@ if submitted and uploaded:
         except Exception as e:
             st.error(f"Failed to read .docx: {e}"); st.stop()
 
-        # quick visibility so we never 'hang' silently
         filled_blocks = sum(1 for k in [
             "problem","value_proposition","unfair_advantage","customer_segments",
             "channels","customer_relationships","key_activities","key_resources",
             "key_partners","revenue_streams","cost_structure","kingdom_impact"
         ] if (payload.get(k) or "").strip())
         st.info(f"Parsed {filled_blocks}/12 canvas blocks from the upload.")
-
         if filled_blocks == 0:
-            st.error("No canvas content detected in the upload. Please use the template or ensure your file has a two-column table with section names in the left column and your input in the right column.")
+            st.error("No canvas content detected. Please use the template or ensure your file has a two-column table with section names in the left column and your input in the right column.")
             st.stop()
 
     with st.spinner("Contacting OpenAI…"):
@@ -349,8 +390,7 @@ if submitted and uploaded:
             )
             raw_md = resp.choices[0].message.content
         except Exception as e:
-            st.error(f"OpenAI request failed (did not complete): {e}")
-            st.stop()
+            st.error(f"OpenAI request failed (did not complete): {e}"); st.stop()
 
     with st.spinner("Finalizing your report…"):
         norm_md = normalize_markdown(raw_md)
