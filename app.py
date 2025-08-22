@@ -26,8 +26,10 @@ def get_client():
     os.environ["OPENAI_API_KEY"] = api_key
     if org_id:  os.environ["OPENAI_ORG_ID"] = org_id
     if proj_id: os.environ["OPENAI_PROJECT"] = proj_id
+    # Per-request timeout (seconds)
     return OpenAI(timeout=60.0)
 
+# Choose model automatically; set USE_GPT4O=1 in Secrets to use gpt-4o
 MODEL_NAME = "gpt-4o" if (os.getenv("USE_GPT4O") == "1" or st.secrets.get("USE_GPT4O") == "1") else "gpt-4o-mini"
 MAX_TOKENS = 7000 if MODEL_NAME == "gpt-4o" else 5000
 
@@ -55,7 +57,7 @@ STRICT_NO_INVENTION = (
     "Do NOT infer or fabricate. This review is stateless and only for this submission."
 )
 
-# --- Depth defaults ---
+# --- Depth-by-default (no toggle) ---
 DEPTH_MIN_COUNTS = {"Strengths": 4, "Weaknesses": 6, "Probing Questions": 10, "Suggested Explorations": 8}
 
 KENYA_LENS = """
@@ -65,10 +67,11 @@ Contextualize critiques for Kenya/East Africa where relevant:
 - County-level regulation & permits, KEBS/product standards, data privacy basics.
 """
 
+# NOTE: changed to qualitative Rating (Weak/Average/Good) instead of numeric score
 DEPTH_INSTRUCTION = f"""
 Depth Mode (default) — Be rigorous and specific while staying diagnostic (no company-specific step-by-step).
 For each major section:
-- Begin with a compact score 'Score: X/5' + 1-line reason.
+- Begin with a compact 'Rating: Weak/Average/Good' (no numeric score) + 1-line reason.
 - **Strengths**: ≥ {DEPTH_MIN_COUNTS['Strengths']} bullets spanning: Market, Customer, Competition, Ops, Finance, Impact, Team/Governance.
 - **Weaknesses**: ≥ {DEPTH_MIN_COUNTS['Weaknesses']} bullets; call out evidence gaps/assumptions.
 - **Probing Questions**: ≥ {DEPTH_MIN_COUNTS['Probing Questions']} bullets; cover Market, Customer, Competition, Ops, Finance/Unit economics, Impact/ESG, Legal/Regulatory, Distribution.
@@ -82,7 +85,7 @@ Include cross-check bullets where relevant:
 If numbers are missing for unit economics, state the exact numbers required (price, gross margin %, CAC, churn %, payback).
 """
 
-# ✅ NEW: response template constant (replaces the broken inline string)
+# Response template constant
 SINAPIS_RESPONSE_TEMPLATE = textwrap.dedent("""
 Use exactly these headings and order:
 
@@ -174,21 +177,22 @@ def read_guide_if_exists(rel_path: str, max_chars: int = 10000) -> str:
 RUBRIC_GUIDE = read_guide_if_exists(os.path.join("guides", "sinapis_rubric.md"))
 WORKBOOK_GUIDE = read_guide_if_exists(os.path.join("guides", "sinapis_workbook.md"))
 
-# (Optional debug; remove later)
-if RUBRIC_GUIDE:
-    st.caption(f"Loaded rubric guide ({len(RUBRIC_GUIDE)} chars)")
-else:
-    st.caption("Rubric guide not found")
-if WORKBOOK_GUIDE:
-    st.caption(f"Loaded workbook guide ({len(WORKBOOK_GUIDE)} chars)")
-else:
-    st.caption("Workbook guide not found")
+# (Optional debug; enable via Secrets: DEBUG_GUIDES="1")
+if st.secrets.get("DEBUG_GUIDES") == "1":
+    if RUBRIC_GUIDE:
+        st.caption(f"Loaded rubric guide ({len(RUBRIC_GUIDE)} chars)")
+    else:
+        st.caption("Rubric guide not found")
+    if WORKBOOK_GUIDE:
+        st.caption(f"Loaded workbook guide ({len(WORKBOOK_GUIDE)} chars)")
+    else:
+        st.caption("Workbook guide not found")
 
-# ---------- Parsing helpers (unchanged) ----------
+# ---------- Label helpers & parser ----------
 def normalize_label(s: str) -> str:
     if not s: return ""
     s = s.strip()
-    s = re.sub(r"^\s*\d+\s*[\.\)\-:]?\s*", "", s)
+    s = re.sub(r"^\s*\d+\s*[\.\)\-:]?\s*", "", s)  # drop "1.", "1)", etc.
     s = s.rstrip(":").strip().lower()
     s = re.sub(r"\s+", " ", s)
     return s
@@ -229,13 +233,18 @@ BASE_PHRASE = {
 }
 
 def guess_key_from_label_cell(left_text: str):
+    """Find the correct field key from a left-cell that may include a label + hint on multiple lines."""
     if not left_text:
         return None
     lines = [normalize_label(x) for x in left_text.splitlines()]
     lines = [x for x in lines if x]
+
+    # 1) exact alias match on any line
     for ln in lines:
         if ln in ALIAS_TO_KEY:
             return ALIAS_TO_KEY[ln]
+
+    # 2) fuzzy contains (base phrase present anywhere on a line)
     for ln in lines:
         for key, phrase in BASE_PHRASE.items():
             if phrase in ln:
@@ -268,8 +277,11 @@ def clean_value(text: str) -> str:
     return "\n".join(out).strip()
 
 def parse_docx_to_payload(doc_bytes: bytes) -> dict:
+    """Parse either two-column tables (Section | Your Input) or our heading-style template."""
     doc = Document(BytesIO(doc_bytes))
     buf = {k: "" for k in FIELD_ALIASES.keys()}
+
+    # A) parse tables first (works with labels+hints in the left cell)
     saw_nonempty = False
     for table in doc.tables:
         for row in table.rows:
@@ -281,6 +293,8 @@ def parse_docx_to_payload(doc_bytes: bytes) -> dict:
                 saw_nonempty = True
     if saw_nonempty:
         return buf
+
+    # B) fallback to heading-style paragraphs (our template)
     current_key = None
     for p in doc.paragraphs:
         t = (p.text or "").strip()
@@ -289,7 +303,7 @@ def parse_docx_to_payload(doc_bytes: bytes) -> dict:
         if norm in ALIAS_TO_KEY:
             current_key = ALIAS_TO_KEY[norm]; continue
         if current_key:
-            if norm in ALIAS_TO_KEY:
+            if norm in ALIAS_TO_KEY:  # new heading inline
                 current_key = ALIAS_TO_KEY[norm]; continue
             val = clean_value(t)
             if val:
@@ -348,9 +362,33 @@ def enforce_missing_for_empty_blocks(norm_md: str, empty_blocks: list[str]) -> s
         out.append(lines[i]); i += 1
     return "\n".join(out).strip()
 
-# ---------- DOCX builder ----------
+# ---------- NEW: convert numeric "Score" to qualitative "Rating" ----------
+def convert_scores_to_ratings(md_text: str) -> str:
+    """
+    Replace lines like '• Score: 2/5 — reason' with '• Rating: Weak — reason'.
+    Mapping: 0–2 => Weak, 3 => Average, 4–5 => Good. Keeps any trailing reason.
+    """
+    pattern = re.compile(
+        r'^(?P<lead>[•\-\*]\s*)?score\s*[:\-]?\s*(?P<num>\d+(?:\.\d+)?)\s*/\s*5(?P<tail>\s*(?:[—\-–].*)?)$',
+        re.IGNORECASE | re.MULTILINE
+    )
+    def repl(m):
+        num = float(m.group('num'))
+        if num <= 2:
+            label = "Weak"
+        elif num < 4:  # i.e., exactly 3
+            label = "Average"
+        else:          # 4 or 5+
+            label = "Good"
+        lead = m.group('lead') or ""
+        tail = m.group('tail') or ""
+        return f"{lead}Rating: {label}{tail}"
+    return pattern.sub(repl, md_text)
+
+# ---------- DOCX builder (styled, centered logo, single footer) ----------
 def build_docx_from_markdown(md_text: str, founder_payload: dict) -> bytes:
     doc = Document()
+    # logo
     base_dir = os.path.dirname(__file__)
     logo_path = os.path.join(base_dir, "assets", "logo.png")
     if os.path.exists(logo_path):
@@ -358,13 +396,16 @@ def build_docx_from_markdown(md_text: str, founder_payload: dict) -> bytes:
             p = doc.add_paragraph(); r = p.add_run()
             r.add_picture(logo_path, width=Inches(1.5)); p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         except Exception: pass
+    # title + description
     title = doc.add_heading(f"Sinapis AI Coach – BMC Review of {founder_payload.get('business_name') or '(Unnamed Business)'}", level=0)
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
     bd = founder_payload.get("brief_description") or "—"
     meta = doc.add_paragraph(); r1 = meta.add_run("Description: "); r1.bold = True; meta.add_run(bd)
+    # styles
     normal = doc.styles["Normal"].font; normal.name = "Calibri"; normal.size = Pt(11)
     h1 = doc.styles["Heading 1"].font; h1.name = "Calibri"; h1.size = Pt(14); h1.bold = True; h1.color.rgb = RGBColor(31,78,121)
     h2 = doc.styles["Heading 2"].font; h2.name = "Calibri"; h2.size = Pt(12); h2.bold = True; h2.color.rgb = RGBColor(0,0,0)
+    # content
     for raw in md_text.splitlines():
         line = raw.strip()
         if line == "": doc.add_paragraph(""); continue
@@ -372,6 +413,7 @@ def build_docx_from_markdown(md_text: str, founder_payload: dict) -> bytes:
         if line.startswith("### "): doc.add_heading(line[4:].strip(), level=2); continue
         if line.startswith(("• ","- ")): doc.add_paragraph(line[2:].strip(), style="List Bullet"); continue
         doc.add_paragraph(line)
+    # footer
     doc.add_paragraph().add_run("Advisory—Not Legal/Financial Advice.").italic = True
     buf = BytesIO(); doc.save(buf); buf.seek(0); return buf.getvalue()
 
@@ -447,6 +489,7 @@ if submitted and uploaded:
     with st.spinner("Finalizing your report…"):
         norm_md = normalize_markdown(raw_md)
         final_md = enforce_missing_for_empty_blocks(norm_md, empty_blocks)
+        final_md = convert_scores_to_ratings(final_md)  # <-- convert any numeric Score to Rating
         render_download_only(final_md, payload)
 
 # ---------- Footer ----------
