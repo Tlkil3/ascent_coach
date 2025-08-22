@@ -29,6 +29,10 @@ def get_client():
     # Firm per-request timeout (seconds)
     return OpenAI(timeout=60.0)
 
+# Choose model automatically; set USE_GPT4O=1 in Secrets to use gpt-4o
+MODEL_NAME = "gpt-4o" if (os.getenv("USE_GPT4O") == "1" or st.secrets.get("USE_GPT4O") == "1") else "gpt-4o-mini"
+MAX_TOKENS = 7000 if MODEL_NAME == "gpt-4o" else 5000
+
 # ---------- Prompts ----------
 SINAPIS_COACH_SYS = textwrap.dedent("""
 You are **Sinapis AI Coach**, reviewing founder submissions using the Sinapis Ascent Business Model Canvas.
@@ -53,81 +57,58 @@ STRICT_NO_INVENTION = (
     "Do NOT infer or fabricate. This review is stateless and only for this submission."
 )
 
-SINAPIS_RESPONSE_TEMPLATE = textwrap.dedent("""
-Use exactly these headings and order:
+# --- Depth-by-default (no toggle) ---
+DEPTH_MIN_COUNTS = {"Strengths": 4, "Weaknesses": 6, "Probing Questions": 10, "Suggested Explorations": 8}
 
-1) Problem
-   Strengths
-   Weaknesses
-   Probing Questions
-   Suggested Explorations
-2) Value Proposition
-   Strengths
-   Weaknesses
-   Probing Questions
-   Suggested Explorations
-3) Unfair Advantage
-   Strengths
-   Weaknesses
-   Probing Questions
-   Suggested Explorations
-4) Customer Segments
-   Strengths
-   Weaknesses
-   Probing Questions
-   Suggested Explorations
-5) Channels
-   Strengths
-   Weaknesses
-   Probing Questions
-   Suggested Explorations
-6) Customer Relationships
-   Strengths
-   Weaknesses
-   Probing Questions
-   Suggested Explorations
-7) Key Activities
-   Strengths
-   Weaknesses
-   Probing Questions
-   Suggested Explorations
-8) Key Resources
-   Strengths
-   Weaknesses
-   Probing Questions
-   Suggested Explorations
-9) Key Partners
-   Strengths
-   Weaknesses
-   Probing Questions
-   Suggested Explorations
-10) Revenue Streams
-   Strengths
-   Weaknesses
-   Probing Questions
-   Suggested Explorations
-11) Cost Structure
-   Strengths
-   Weaknesses
-   Probing Questions
-   Suggested Explorations
-12) Kingdom Impact
-   Strengths
-   Weaknesses
-   Probing Questions
-   Suggested Explorations
+KENYA_LENS = """
+Contextualize critiques for Kenya/East Africa where relevant:
+- Mobile money (e.g., M-Pesa), agent networks, last-mile logistics, power/connectivity reliability.
+- Seasonality (agri, school terms), cash cycle & working capital constraints, FX risk, import duties/customs.
+- County-level regulation & permits, KEBS/product standards, data privacy basics.
+"""
 
-13) Cross-Block Observations
-   Inconsistencies
-   Opportunities to Strengthen
+DEPTH_INSTRUCTION = f"""
+Depth Mode (default) — Be rigorous and specific while staying diagnostic (no company-specific step-by-step).
+For each major section:
+- Begin with a compact score 'Score: X/5' + 1-line reason.
+- **Strengths**: ≥ {DEPTH_MIN_COUNTS['Strengths']} bullets spanning: Market, Customer, Competition, Ops, Finance, Impact, Team/Governance.
+- **Weaknesses**: ≥ {DEPTH_MIN_COUNTS['Weaknesses']} bullets; call out evidence gaps/assumptions.
+- **Probing Questions**: ≥ {DEPTH_MIN_COUNTS['Probing Questions']} bullets; cover Market, Customer, Competition, Ops, Finance/Unit economics, Impact/ESG, Legal/Regulatory, Distribution.
+- **Suggested Explorations**: ≥ {DEPTH_MIN_COUNTS['Suggested Explorations']} bullets; use experiment categories (smoke test, concierge/pilot, pricing, channel trial, churn interview, service blueprint, instrumentation).
+If a block is empty, keep only 'Missing/Needs input.' as required by the strict rule.
+"""
 
-14) Final Assessment
-   Quick Wins
-   Deeper Strategic Questions
-   Overall Cohesiveness
+CONSISTENCY_MATRIX = """
+Include cross-check bullets where relevant:
+- Value↔Segment fit, Segment↔Channels reach/cost, Costs↔Revenue seasonality/cash cycle, Activities↔Resources & Partners.
+If numbers are missing for unit economics, state the exact numbers required (price, gross margin %, CAC, churn %, payback).
+"""
 
-Footer: Advisory—Not Legal/Financial Advice.
-""").strip()
+# --- Optional: load rubric/workbook snippets from guides/ if present ---
+def read_guide_if_exists(rel_path: str, max_chars: int = 10000) -> str:
+    base_dir = os.path.dirname(__file__)
+    path = os.path.join(base_dir, rel_path)
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read()[:max_chars]
+        except Exception:
+            return ""
+    return ""
+
+RUBRIC_GUIDE = read_guide_if_exists(os.path.join("guides", "sinapis_rubric.md"))
+WORKBOOK_GUIDE = read_guide_if_exists(os.path.join("guides", "sinapis_workbook.md"))
+
+# DEBUG: show guide sizes (remove after confirming)
+if RUBRIC_GUIDE:
+    st.caption(f"Loaded rubric guide ({len(RUBRIC_GUIDE)} chars)")
+else:
+    st.caption("Rubric guide not found")
+
+if WORKBOOK_GUIDE:
+    st.caption(f"Loaded workbook guide ({len(WORKBOOK_GUIDE)} chars)")
+else:
+    st.caption("Workbook guide not found")
 
 # ---------- Label helpers & parser ----------
 def normalize_label(s: str) -> str:
@@ -364,7 +345,7 @@ if submitted and uploaded:
         ] if (payload.get(k) or "").strip())
         st.info(f"Parsed {filled_blocks}/12 canvas blocks from the upload.")
         if filled_blocks == 0:
-            st.error("No canvas content detected. Please use the template or ensure your file has a two-column table with section names in the left column and your input in the right column.")
+            st.error("No canvas content detected. Ensure your file has a two-column table with section names in the left column and your input in the right column, or use our template.")
             st.stop()
 
     with st.spinner("Contacting OpenAI…"):
@@ -375,18 +356,107 @@ if submitted and uploaded:
             + "\n\nEMPTY_BLOCKS: " + str(empty_blocks)
             + "\n\nUse the response template exactly."
         )
+
+        # Build messages (deep critique by default + optional guides)
+        messages = [
+            {"role": "system", "content": SINAPIS_COACH_SYS},
+            {"role": "system", "content": MARKDOWN_INSTRUCTION},
+            {"role": "system", "content": STRICT_NO_INVENTION},
+            {"role": "system", "content": DEPTH_INSTRUCTION},
+            {"role": "system", "content": KENYA_LENS},
+            {"role": "system", "content": CONSISTENCY_MATRIX},
+            {"role": "system", "content": "Response Template:\n" + textwrap.dedent(\"\"\"\
+Use exactly these headings and order:
+
+1) Problem
+   Strengths
+   Weaknesses
+   Probing Questions
+   Suggested Explorations
+2) Value Proposition
+   Strengths
+   Weaknesses
+   Probing Questions
+   Suggested Explorations
+3) Unfair Advantage
+   Strengths
+   Weaknesses
+   Probing Questions
+   Suggested Explorations
+4) Customer Segments
+   Strengths
+   Weaknesses
+   Probing Questions
+   Suggested Explorations
+5) Channels
+   Strengths
+   Weaknesses
+   Probing Questions
+   Suggested Explorations
+6) Customer Relationships
+   Strengths
+   Weaknesses
+   Probing Questions
+   Suggested Explorations
+7) Key Activities
+   Strengths
+   Weaknesses
+   Probing Questions
+   Suggested Explorations
+8) Key Resources
+   Strengths
+   Weaknesses
+   Probing Questions
+   Suggested Explorations
+9) Key Partners
+   Strengths
+   Weaknesses
+   Probing Questions
+   Suggested Explorations
+10) Revenue Streams
+   Strengths
+   Weaknesses
+   Probing Questions
+   Suggested Explorations
+11) Cost Structure
+   Strengths
+   Weaknesses
+   Probing Questions
+   Suggested Explorations
+12) Kingdom Impact
+   Strengths
+   Weaknesses
+   Probing Questions
+   Suggested Explorations
+
+13) Cross-Block Observations
+   Inconsistencies
+   Opportunities to Strengthen
+
+14) Final Assessment
+   Quick Wins
+   Deeper Strategic Questions
+   Overall Cohesiveness
+
+Footer: Advisory—Not Legal/Financial Advice.
+\"\"\")},
+        ]
+
+        # Inject optional guides if present
+        if RUBRIC_GUIDE:
+            messages.insert(0, {"role": "system", "content": "Sinapis Internal Rubric (excerpt):\n" + RUBRIC_GUIDE})
+        if WORKBOOK_GUIDE:
+            messages.insert(1, {"role": "system", "content": "Sinapis Workbook Notes (excerpt):\n" + WORKBOOK_GUIDE})
+
+        messages.append({"role": "user", "content": user_message})
+
         try:
             client = get_client()
             resp = client.chat.completions.create(
-                model="gpt-4o-mini",
+                model=MODEL_NAME,
                 temperature=0.0,
-                messages=[
-                    {"role": "system", "content": SINAPIS_COACH_SYS},
-                    {"role": "system", "content": MARKDOWN_INSTRUCTION},
-                    {"role": "system", "content": STRICT_NO_INVENTION},
-                    {"role": "system", "content": "Response Template:\n" + SINAPIS_RESPONSE_TEMPLATE},
-                    {"role": "user", "content": user_message},
-                ],
+                max_tokens=MAX_TOKENS,
+                messages=messages,
             )
             raw_md = resp.choices[0].message.content
         except Exception as e:
